@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+gunicorn>=23,<24
+telethon>=1.40,<2
+python-multipart>=0.0.20,<1
+itsdangerous>=2.2,<3
