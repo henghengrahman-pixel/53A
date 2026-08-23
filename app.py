@@ -77,13 +77,32 @@ def log(level, message):
 def authorized(request): return request.session.get("auth") is True
 def redirect(path="/"): return RedirectResponse(path, status_code=303)
 
+def sent_today_count():
+    """Hitung pengiriman berdasarkan tanggal kalender WIB, bukan timezone server."""
+    today_wib = now().date()
+    rows = db.execute("""SELECT sent_at FROM queue WHERE status='sent' AND sent_at IS NOT NULL
+      UNION ALL SELECT sent_at FROM resends WHERE status='sent' AND sent_at IS NOT NULL""").fetchall()
+    total = 0
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(row[0])
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=TZ)
+            if dt.astimezone(TZ).date() == today_wib: total += 1
+        except (TypeError,ValueError):
+            continue
+    return total
+
+def next_reset_text():
+    tomorrow = now().date() + timedelta(days=1)
+    return datetime.combine(tomorrow, datetime.min.time(), tzinfo=TZ).strftime("%d-%m-%Y 00:00 WIB")
+
 STYLE = """
 body{margin:0;background:#090b10;color:#e8e9ec;font:14px Arial}nav{background:#11151d;padding:15px 5%;display:flex;gap:18px}nav a{color:#f1c75b;text-decoration:none}.wrap{max-width:1100px;margin:24px auto;padding:0 18px}.card{background:#121720;border:1px solid #252d3a;border-radius:12px;padding:18px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.stat{font-size:26px;color:#f1c75b}input,textarea,select{width:100%;box-sizing:border-box;background:#090d13;color:white;border:1px solid #333d4e;border-radius:7px;padding:10px;margin:6px 0 12px}button,.btn{background:#e6b94b;color:#111;border:0;border-radius:7px;padding:10px 14px;font-weight:bold;cursor:pointer;text-decoration:none;display:inline-block}button.danger{background:#d95b5b;color:white}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;border-bottom:1px solid #29313e}.muted{color:#98a1af}.ok{color:#70d69b}.bad{color:#ff7f7f}.flash{background:#22334a;padding:10px;border-radius:7px}@media(max-width:700px){table{font-size:12px}.hide-mobile{display:none}}
 """
 
 def page(title, body, request=None):
     flash = request.session.pop("flash", "") if request else ""
-    nav = "<nav><b>DENTOTO Follow-up</b><a href='/'>Dashboard</a><a href='/contacts'>Kontak</a><a href='/history'>Riwayat Terkirim</a><a href='/campaign/resend'>Kampanye Kirim Ulang</a><a href='/settings'>Pengaturan</a><a href='/telegram'>Telegram</a><a href='/logout'>Keluar</a></nav>" if request and authorized(request) else ""
+    nav = "<nav><b>KENZO DEV - DENTOTO </b><a href='/'>Dashboard</a><a href='/contacts'>Kontak</a><a href='/history'>Riwayat Terkirim</a><a href='/campaign/resend'>Kampanye Kirim Ulang</a><a href='/settings'>Pengaturan</a><a href='/telegram'>Telegram</a><a href='/logout'>Keluar</a></nav>" if request and authorized(request) else ""
     return HTMLResponse(f"<!doctype html><html><head><meta name='viewport' content='width=device-width'><title>{title}</title><style>{STYLE}</style></head><body>{nav}<main class='wrap'>{('<div class=flash>'+flash+'</div>') if flash else ''}{body}</main></body></html>")
 
 @asynccontextmanager
@@ -127,9 +146,9 @@ async def dashboard(request: Request):
     counts = {r["status"]: r["n"] for r in db.execute("SELECT status,count(*) n FROM (SELECT status FROM queue UNION ALL SELECT status FROM resends) GROUP BY status")}
     contacts = db.execute("SELECT count(*) FROM contacts").fetchone()[0]
     selected = db.execute("SELECT count(*) FROM contacts WHERE selected=1 AND blocked=0").fetchone()[0]
-    sent_today = db.execute("SELECT count(*) FROM (SELECT status,sent_at FROM queue UNION ALL SELECT status,sent_at FROM resends) WHERE status='sent' AND substr(sent_at,1,10)=?", (now().date().isoformat(),)).fetchone()[0]
+    sent_today = sent_today_count()
     connected = bool(client and await client.is_user_authorized())
-    body = f"<h1>Dashboard Follow-up</h1><div class=grid><div class=card><div class=muted>Kontak valid</div><div class=stat>{contacts}</div></div><div class=card><div class=muted>Dipilih</div><div class=stat>{selected}</div></div><div class=card><div class=muted>Terkirim hari ini</div><div class=stat>{sent_today}</div></div><div class=card><div class=muted>Telegram</div><div class='stat {'ok' if connected else 'bad'}'>{'Terhubung' if connected else 'Belum login'}</div></div></div><div class=card><h3>Kampanye</h3><p>Status: <b>{'AKTIF' if setting('campaign_active')=='1' else 'NONAKTIF'}</b> · Pending: {counts.get('pending',0)} · Dibalas: {counts.get('replied',0)} · Gagal: {counts.get('failed',0)}</p><form method=post action='/campaign/start' style='display:inline'><button>Mulai / Lanjutkan</button></form> <form method=post action='/campaign/stop' style='display:inline'><button class=danger>Hentikan</button></form></div><div class=card><h3>Cara penggunaan</h3><ol><li>Login Telegram Official pada menu Telegram.</li><li>Sinkronkan chat masuk.</li><li>Pilih penerima pada menu Kontak.</li><li>Periksa pesan dan batas pengiriman.</li><li>Mulai kampanye.</li></ol></div>"
+    body = f"<h1>Dashboard Follow-up</h1><div class=grid><div class=card><div class=muted>Kontak valid</div><div class=stat>{contacts}</div></div><div class=card><div class=muted>Dipilih</div><div class=stat>{selected}</div></div><div class=card><div class=muted>Kuota hari ini</div><div class=stat>{sent_today} / {setting('daily_limit')}</div><small class=muted>Reset: {next_reset_text()}</small></div><div class=card><div class=muted>Telegram</div><div class='stat {'ok' if connected else 'bad'}'>{'Terhubung' if connected else 'Belum login'}</div></div></div><div class=card><h3>Kampanye</h3><p>Status: <b>{'AKTIF' if setting('campaign_active')=='1' else 'NONAKTIF'}</b> · Pending: {counts.get('pending',0)} · Dibalas: {counts.get('replied',0)} · Gagal: {counts.get('failed',0)}</p><p class=muted>Jika kuota harian habis, antrean berhenti sementara dan lanjut otomatis setelah pukul 00.00 WIB.</p><form method=post action='/campaign/start' style='display:inline'><button>Mulai / Lanjutkan</button></form> <form method=post action='/campaign/stop' style='display:inline'><button class=danger>Hentikan</button></form></div><div class=card><h3>Cara penggunaan</h3><ol><li>Login Telegram Official pada menu Telegram.</li><li>Sinkronkan chat masuk.</li><li>Pilih penerima pada menu Kontak.</li><li>Periksa pesan dan batas pengiriman.</li><li>Mulai kampanye.</li></ol></div>"
     return page("Dashboard", body, request)
 
 @app.get("/telegram", response_class=HTMLResponse)
@@ -332,14 +351,25 @@ async def select_contacts(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
     if not authorized(request): return redirect("/login")
-    body = f"<h1>Pengaturan</h1><div class=card><form method=post><label>Pesan pertama</label><textarea name=message_1 rows=4>{setting('message_1')}</textarea><label>Pesan kedua</label><textarea name=message_2 rows=4>{setting('message_2')}</textarea><label>Pesan ketiga</label><textarea name=message_3 rows=4>{setting('message_3')}</textarea><div class=grid><div><label>Usia chat (hari) — isi 0 untuk semua riwayat</label><input type=number min=0 max=3650 name=max_age_days value={setting('max_age_days')}></div><div><label>Batas kirim per hari</label><input type=number min=1 max=100 name=daily_limit value={setting('daily_limit')}></div><div><label>Jeda setiap kirim (detik)</label><input type=number min=30 max=3600 name=interval_seconds value={setting('interval_seconds')}></div><div><label>Follow-up kedua (jam)</label><input type=number min=1 name=step2_hours value={setting('step2_hours')}></div><div><label>Follow-up ketiga (jam dari pertama)</label><input type=number min=2 name=step3_hours value={setting('step3_hours')}></div></div><button>Simpan Pengaturan</button></form></div>"
+    body = f"<h1>Pengaturan</h1><div class=card><form method=post><label>Pesan pertama</label><textarea name=message_1 rows=4>{setting('message_1')}</textarea><label>Pesan kedua</label><textarea name=message_2 rows=4>{setting('message_2')}</textarea><label>Pesan ketiga</label><textarea name=message_3 rows=4>{setting('message_3')}</textarea><div class=grid><div><label>Usia chat (hari) — isi 0 untuk semua riwayat</label><input type=number min=0 max=3650 name=max_age_days value={setting('max_age_days')}></div><div><label>Batas kirim per hari (maks. 1.000)</label><input type=number min=1 max=1000 name=daily_limit value={setting('daily_limit')}></div><div><label>Jeda setiap kirim (detik)</label><input type=number min=30 max=3600 name=interval_seconds value={setting('interval_seconds')}></div><div><label>Follow-up kedua (jam)</label><input type=number min=1 name=step2_hours value={setting('step2_hours')}></div><div><label>Follow-up ketiga (jam dari pertama)</label><input type=number min=2 name=step3_hours value={setting('step3_hours')}></div></div><p class=muted>Kuota kembali ke 0 otomatis setiap pukul 00.00 WIB. Telegram tetap dapat memberlakukan FloodWait jika pengiriman terlalu cepat.</p><button>Simpan Pengaturan</button></form></div>"
     return page("Pengaturan", body, request)
 
 @app.post("/settings")
 async def save_settings(request: Request):
     if not authorized(request): return redirect("/login")
     form = await request.form()
-    for key in ["message_1","message_2","message_3","max_age_days","daily_limit","interval_seconds","step2_hours","step3_hours"]: set_setting(key, form[key])
+    set_setting("message_1", str(form["message_1"])[:4000])
+    set_setting("message_2", str(form["message_2"])[:4000])
+    set_setting("message_3", str(form["message_3"])[:4000])
+    numeric_limits = {
+        "max_age_days": (0,3650), "daily_limit": (1,1000),
+        "interval_seconds": (30,3600), "step2_hours": (1,8760),
+        "step3_hours": (2,17520)
+    }
+    for key,(minimum,maximum) in numeric_limits.items():
+        try: value = int(form[key])
+        except (TypeError,ValueError): value = int(DEFAULTS[key])
+        set_setting(key, max(minimum,min(maximum,value)))
     request.session["flash"] = "Pengaturan disimpan."
     return redirect("/settings")
 
@@ -377,7 +407,7 @@ async def queue_worker():
         try:
             await asyncio.sleep(5)
             if setting("campaign_active") != "1" or not client or not await client.is_user_authorized(): continue
-            sent_today = db.execute("SELECT count(*) FROM (SELECT status,sent_at FROM queue UNION ALL SELECT status,sent_at FROM resends) WHERE status='sent' AND substr(sent_at,1,10)=?", (now().date().isoformat(),)).fetchone()[0]
+            sent_today = sent_today_count()
             if sent_today >= int(setting("daily_limit")): continue
             item = db.execute("""SELECT r.*, 'resends' source FROM resends r JOIN contacts c ON c.user_id=r.user_id
               WHERE r.status='pending' AND r.due_at<=? AND c.blocked=0 ORDER BY r.due_at,r.id LIMIT 1""", (iso(),)).fetchone()
